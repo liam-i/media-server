@@ -117,9 +117,12 @@ int rtmp_event_handler(struct rtmp_t* rtmp, const struct rtmp_chunk_header_t* he
 	switch (event)
 	{
 	case RTMP_EVENT_STREAM_BEGIN:
-	case RTMP_EVENT_STREAM_EOF:
 	case RTMP_EVENT_STREAM_DRY:
 	case RTMP_EVENT_STREAM_IS_RECORD:
+		return 6;
+
+    case RTMP_EVENT_STREAM_EOF:
+		rtmp->client.oneof ? rtmp->client.oneof(rtmp->param, streamId) : 0;
 		return 6;
 
 	case RTMP_EVENT_SET_BUFFER_LENGTH:
@@ -128,7 +131,7 @@ int rtmp_event_handler(struct rtmp_t* rtmp, const struct rtmp_chunk_header_t* he
 		return 10;
 
 	case RTMP_EVENT_PING:
-		rtmp->u.client.onping(rtmp->param, streamId);
+		rtmp->client.onping ? rtmp->client.onping(rtmp->param, streamId) : 0;
 		return 6;
 
 	case RTMP_EVENT_PONG:

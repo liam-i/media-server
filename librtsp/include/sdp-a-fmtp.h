@@ -1,6 +1,10 @@
 #ifndef _sdp_a_fmtp_h_
 #define _sdp_a_fmtp_h_
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // H.264
 enum { 
 	SDP_A_FMTP_H264_PROFILE_LEVEL_ID			= 0x00000001,
@@ -58,6 +62,23 @@ struct sdp_a_fmtp_h264_t
 
 int sdp_a_fmtp_h264(const char* fmtp, int *format, struct sdp_a_fmtp_h264_t *h264);
 
+// H.265
+enum {
+	SDP_A_FMTP_H265_SPROP_VPS = 0x00000100,
+	SDP_A_FMTP_H265_SPROP_SPS = 0x00000200,
+	SDP_A_FMTP_H265_SPROP_PPS = 0x00000400,
+	SDP_A_FMTP_H265_SPROP_SEI = 0x00000800,
+};
+struct sdp_a_fmtp_h265_t
+{
+	int flags; // test with (1<<SDP_A_FMTP_H265_xxx)
+	char sprop_vps[1];
+	char sprop_sps[1];
+	char sprop_pps[1];
+	char sprop_sei[1];
+};
+
+int sdp_a_fmtp_h265(const char* fmtp, int *format, struct sdp_a_fmtp_h265_t *h265);
 
 // mpeg4-generic
 enum { 
@@ -106,4 +127,14 @@ struct sdp_a_fmtp_mpeg4_t
 
 int sdp_a_fmtp_mpeg4(const char* fmtp, int *format, struct sdp_a_fmtp_mpeg4_t *mpeg4);
 
+struct sdp_a_fmtp_rtx_t
+{
+	int apt;
+	int rtx_time; // milliseconds 
+};
+int sdp_a_fmtp_rtx(const char* fmtp, int* format, struct sdp_a_fmtp_rtx_t* rtx);
+
+#ifdef __cplusplus
+}
+#endif
 #endif /* !_sdp_a_fmtp_h_ */

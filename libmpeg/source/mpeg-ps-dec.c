@@ -1,166 +1,483 @@
 // ITU-T H.222.0(06/2012)
-// Information technology 每 Generic coding of moving pictures and associated audio information: Systems
+// Information technology - Generic coding of moving pictures and associated audio information: Systems
 // 2.5.3.1 Program stream(p74)
 
 #include <stdio.h>
 #include <stdlib.h>
 #include "mpeg-ps.h"
-#include "mpeg-ps-proto.h"
-#include "mpeg-pes-proto.h"
+#include "mpeg-ps-internal.h"
+#include "mpeg-pes-internal.h"
+#include "mpeg-util.h"
 #include <assert.h>
 #include <string.h>
+#include <errno.h>
 
-struct mpeg_ps_unpacker_t
+#define N_BUFFER_INIT   256
+#define N_BUFFER_MAX    (512*1024)
+#define N_BUFFER_INC    (8000)
+
+enum ps_demuxer_state_t
 {
-	ps_system_header_t syshd;
-	psm_t psm;
-
-	struct mpeg_ps_func_t *func;
-	void* param;	
+    PS_DEMUXER_STATE_START = 0,
+    PS_DEMUXER_STATE_DATA,
 };
 
-static size_t ps_system_header_dec(const uint8_t* data, size_t bytes, ps_system_header_t *syshd)
+struct ps_demuxer_t
 {
-	int i,j;
-	size_t len;
+    struct psm_t psm;
+    struct psd_t psd;
 
-	// 2.5.3.5 System header
-	// Table 2-40 每 Program stream system header
-	assert(0x00==data[0] && 0x00==data[1] && 0x01==data[2] && 0xBB==data[3]);
-	len = (data[4] << 8) | data[5];
-	assert(len + 6 <= bytes);
+    struct ps_pack_header_t pkhd;
+    struct ps_system_header_t system;
 
-	assert((0x80 & data[6]) == 0x80); // '1xxxxxxx'
-	assert((0x01 & data[8]) == 0x01); // 'xxxxxxx1'
-	syshd->rate_bound = ((data[6] & 0x7F) << 15) | (data[7] << 7) | ((data[8] >> 1) & 0x7F);
+    enum ps_demuxer_state_t state;
+    struct pes_t* pes;
+    size_t pes_length;
+    struct
+    {
+        uint8_t* ptr;
+        size_t len, cap;
+    } buffer;
 
-	syshd->audio_bound = (data[9] >> 2) & 0x3F;
-	syshd->fixed_flag = (data[9] >> 1) & 0x01;
-	syshd->CSPS_flag = (data[9] >> 0) & 0x01;
+    int start;
+    int sync;
 
-	assert((0x20 & data[10]) == 0x20); // 'xx1xxxxx'
-	syshd->system_audio_lock_flag = (data[10] >> 7) & 0x01;
-	syshd->system_video_lock_flag = (data[10] >> 6) & 0x01;
-	syshd->video_bound = data[10] & 0x1F;
+    ps_demuxer_onpacket onpacket;
+	void* param;
 
-//	assert((0x7F & data[11]) == 0x00); // 'x0000000'
-	syshd->packet_rate_restriction_flag = (data[11] >> 7) & 0x01;
+    struct ps_demuxer_notify_t notify;
+    void* notify_param;
+};
 
-	i = 12;
-	for(j = 0; (data[i] & 0x80) == 0x80 && j < NSTREAM; j++)
-	{
-		syshd->streams[j].stream_id = data[i++];
-		if(syshd->streams[j].stream_id == 0xB7) // '10110111'
-		{
-			assert(data[i] == 0xC0); // '11000000'
-			assert((data[i+1] & 80) == 0); // '1xxxxxxx'
-			syshd->streams[j].stream_id = (syshd->streams[j].stream_id << 7) | (data[i+1] & 0x7F);
-			assert(data[i+2] == 0xB6); // '10110110'
-			i += 3;
-		}
+static void ps_demuxer_notify(struct ps_demuxer_t* ps);
 
-		assert((data[i] & 0xC0) == 0xC0); // '11xxxxxx'
-		syshd->streams[j].buffer_bound_scale = (data[i] >> 5) & 0x01;
-		syshd->streams[j].buffer_size_bound = (data[i] & 0x1F) | data[i+1];
-		i += 2;
-	}
+static int ps_demuxer_find_startcode(struct mpeg_bits_t *reader)
+{
+    uint8_t v8;
+    size_t zeros;
 
-	return len + 4 + 2;
+    zeros = 0;
+    while (1)
+    {
+        v8 = mpeg_bits_read8(reader);
+        if (0 != mpeg_bits_error(reader))
+            break;
+
+        if (0x01 == v8 && zeros >= 2)
+            return 0;
+
+        zeros = 0x00 != v8 ? 0 : (zeros + 1);
+    }
+
+    return -1;
 }
 
-size_t mpeg_ps_unpacker_input(void* ptr, const uint8_t* data, size_t bytes)
+#if defined(MPEG_ZERO_PAYLOAD_LENGTH)
+static int ps_demuxer_find_pes_start(struct mpeg_bits_t* reader)
 {
-	size_t i=0, n=0, len, c;
-	pes_t pes;
-	ps_packet_header_t pkhd;
-	struct mpeg_ps_unpacker_t *unpacker;
-	uint8_t *packet;
+    size_t origin, offset;
+    origin = mpeg_bits_tell(reader);
+    while (0 == mpeg_bits_error(reader))
+    {
+        if (0 != ps_demuxer_find_startcode(reader))
+            break;
 
-	unpacker = (struct mpeg_ps_unpacker_t*)ptr;
-	packet = unpacker->func->alloc(unpacker->param, bytes);
-	if(!packet || bytes < 4) 
-		return bytes; // TODO: check return
+        offset = mpeg_bits_tell(reader);
+        if (PES_SID_START == mpeg_bits_read8(reader) && 0 == mpeg_bits_error(reader))
+        {
+            mpeg_bits_seek(reader, origin);
+            return (int)(offset - origin - 3);
+        }
+        mpeg_bits_seek(reader, offset); // restore
+    }
 
-	memset(&pkhd, 0, sizeof(pkhd));
-	// 2.5.3.3 Pack layer of program stream
-	// Table 2-38 每 Program stream pack
-	// Table 2-39 每 Program stream pack header
-	if (0x00==data[0] && 0x00==data[1] && 0x01==data[2] && PES_SID_START==data[3])
-	{
-		//assert(0x00==data[0] && 0x00==data[1] && 0x01==data[2] && PES_SID_START==data[3]);
-		assert((0x44 & data[4]) == 0x44); // '01xxx1xx'
-		assert((0x04 & data[6]) == 0x04); // 'xxxxx1xx'
-		assert((0x04 & data[8]) == 0x04); // 'xxxxx1xx'
-		assert((0x01 & data[9]) == 0x01); // 'xxxxxxx1'
-		pkhd.system_clock_reference_base = (((uint64_t)(data[4] >> 3) & 0x07) << 30) | (((uint64_t)data[4] & 0x3) << 28) | ((uint64_t)data[5] << 20) | ((((uint64_t)data[6] >> 3) & 0x1F) << 15) | (((uint64_t)data[6] & 0x3) << 13) | ((uint64_t)data[7] << 5) | ((data[8] >> 3) & 0x1F);
-		pkhd.system_clock_reference_extension = ((data[8] & 0x3) << 7) | ((data[9] >> 1) & 0x7F);
+    mpeg_bits_seek(reader, origin);
+    return -1;
+}
+#endif
 
-		assert((0x03 & data[12]) == 0x03); // 'xxxxxx11'
-		pkhd.program_mux_rate = (data[10] << 14) | (data[11] << 6) | ((data[12] >> 2) & 0x3F);
+static int ps_sync_start_probe(struct mpeg_bits_t* reader)
+{
+    if (0x000001 == mpeg_bits_tryread(reader, 3))
+        return MPEG_ERROR_OK;
 
-		//assert((0xF8 & data[13]) == 0x00); // '00000xxx'
-		len = data[13] & 0x07; // stuffing
+    if (mpeg_bits_tell(reader) + 3 > mpeg_bits_length(reader))
+        return MPEG_ERROR_NEED_MORE_DATA;
 
-		i = 14 + len;
-		assert(0x00==data[i] && 0x00==data[i+1] && 0x01==data[i+2]);
-		if(PES_SID_SYS == data[i+3])
-		{
-			i += ps_system_header_dec(data + i, bytes - i, &unpacker->syshd);
-			assert(0x00==data[i] && 0x00==data[i+1] && 0x01==data[i+2]);
-		}
-	}
-
-	// MPEG_program_end_code = 0x000000B9
-	memset(&pes, 0, sizeof(pes));
-	while(i + 3 < bytes && 0x00==data[i] && 0x00==data[i+1] && 0x01==data[i+2] 
-			&& PES_SID_END != data[i+3] 
-			&& PES_SID_START != data[i+3]
-			&& (0 == pes.sid || pes.sid == data[i+3])) // the same pes stream(video/audio combine)
-	{
-		uint16_t len2;
-		pes.payload = packet + n;
-		pes.payload_len = 0;
-		len2 = (data[i+4] << 8) | data[i+5];
-		assert((size_t)len2 + 6 <= bytes - i);
-		pes_read(data + i, len2 + 6, &unpacker->psm, &pes);
-
-		n += pes.payload_len;
-		i += len2 + 6;
-	}
-
-	// find stream type
-	for(c = 0; c < unpacker->psm.stream_count; ++c)
-	{
-		if(unpacker->psm.streams[c].pesid == pes.sid)
-		{
-			pes.avtype = unpacker->psm.streams[c].avtype;
-			break;
-		}
-	}
-
-	unpacker->func->write(unpacker->param, (int)pes.avtype, packet, n);
-	unpacker->func->free(unpacker->param, packet);
-
-	return i + ((i+3 < bytes && PES_SID_END==data[i+3]) ? 4 : 0);
+    return MPEG_ERROR_INVALID_DATA;
 }
 
-void* mpeg_ps_unpacker_create(struct mpeg_ps_func_t *func, void* param)
+static int ps_demuxer_onpes(void* param, int program, int stream, int codecid, int flags, int64_t pts, int64_t dts, const void* data, size_t bytes)
 {
-	struct mpeg_ps_unpacker_t* unpacker;
-	unpacker = malloc(sizeof(struct mpeg_ps_unpacker_t));
-	if(!unpacker)
+    struct ps_demuxer_t* ps;
+    ps = (struct ps_demuxer_t*)param;
+    assert(0 == program); // unused(ts demux only)
+    return ps->onpacket(ps->param, stream, codecid, flags, pts, dts, data, bytes);
+}
+
+static struct pes_t* psm_fetch(struct psm_t* psm, uint8_t sid)
+{
+    size_t i;
+    for (i = 0; i < psm->stream_count; ++i)
+    {
+        if (psm->streams[i].sid == sid)
+            return &psm->streams[i];
+    }
+
+    if (psm->stream_count < sizeof(psm->streams) / sizeof(psm->streams[0]))
+    {
+		// '110x xxxx'
+		// ISO/IEC 13818-3 or ISO/IEC 11172-3 or ISO/IEC 13818-7 or 
+		// ISO/IEC 14496-3 or ISO/IEC 23008-3 audio stream number 'x xxxx'
+
+		// '1110 xxxx'
+		// Rec. ITU-T H.262 | ISO/IEC 13818-2, ISO/IEC 11172-2, ISO/IEC 14496-2, 
+		// Rec. ITU-T H.264 | ISO/IEC 14496-10 or 
+		// Rec. ITU-T H.265 | ISO/IEC 23008-2 video stream number 'xxxx'
+
+        // guess stream codec id
+#if defined(MPEG_GUESS_STREAM) || defined(MPEG_H26X_VERIFY)
+        if (0xE0 <= sid && sid <= 0xEF)
+        {
+            psm->streams[psm->stream_count].pid = sid;
+            psm->streams[psm->stream_count].codecid = PSI_STREAM_RESERVED; // unknown
+            return &psm->streams[psm->stream_count++];
+        }
+#endif
+#if defined(MPEG_GUESS_STREAM)
+        if(0xC0 <= sid && sid <= 0xDF)
+        {
+            psm->streams[psm->stream_count].pid = sid;
+            psm->streams[psm->stream_count].codecid = PSI_STREAM_AAC;
+            return &psm->streams[psm->stream_count++];
+        }
+#endif
+    }
+
+    return NULL;
+}
+
+static int ps_demuxer_packet(struct ps_demuxer_t *ps, const uint8_t* data, size_t bytes)
+{
+    int r;
+    struct pes_t* pes;
+
+    pes = ps->pes;
+
+#if defined(MPEG_LIVING_VIDEO_FRAME_DEMUX)
+    // video packet size > 0xFFFF, split by pts/dts
+    if (PES_SID_VIDEO == pes->sid
+        && PSI_STREAM_H264 != pes->codecid && PSI_STREAM_H265 != pes->codecid && PSI_STREAM_H266 != pes->codecid
+        && (pes->pkt.size > 0 || pes->len + pes->PES_header_data_length + 3 == 0xFFFF))
+        pes->len = 0;
+#endif
+
+    pes->flags = pes->data_alignment_indicator ? MPEG_FLAG_IDR_FRAME : 0;
+    r = pes_packet(&pes->pkt, pes, data, bytes, ps->start, ps_demuxer_onpes, ps);
+    ps->start = 0; // clear start flags
+    return r;
+}
+
+static int ps_demuxer_skip(struct ps_demuxer_t* ps, struct mpeg_bits_t* reader, uint8_t v8)
+{
+    // '110x xxxx' ISO/IEC 13818-3 or ISO/IEC 11172-3 or ISO/IEC 13818-7 or ISO/IEC 14496-3 or ISO/IEC 23008-3 audio stream number 'x xxxx'
+    // '1110 xxxx' Rec. ITU-T H.262 | ISO/IEC 13818-2, ISO/IEC 11172-2, ISO/IEC 14496-2, Rec. ITU-T H.264 | ISO/IEC 14496-10, Rec. ITU-T H.265 | ISO/IEC 23008-2, Rec. ITU-T H.266 | ISO/IEC 23090-3 or ISO/IEC 23094-1 video stream number 'xxxx'
+    // '1111 1101' extended_stream_id
+    if ((v8 >= 0xC0 && v8 <= 0xDF) || (v8 >= 0xE0 && v8 <= 0xEF) || v8 == PES_SID_PRIVATE_1 || v8 == 0xFD)
+    {
+        // skip PES
+        mpeg_bits_skip(reader, mpeg_bits_read16(reader));
+        if (mpeg_bits_error(reader))
+            return MPEG_ERROR_NEED_MORE_DATA;
+    }
+    else
+    {
+        // backward 1-step
+        mpeg_bits_seek(reader, mpeg_bits_tell(reader) - 1);
+        assert(0 == mpeg_bits_error(reader));
+        ps->sync = 0; // wait for next start packet
+    }
+
+    return MPEG_ERROR_OK;
+}
+
+static int ps_demuxer_header(struct ps_demuxer_t* ps, struct mpeg_bits_t* reader)
+{
+    int r;
+    size_t n;
+	size_t off;
+    uint8_t v8;
+    struct pes_t* pes;
+
+    for (off = mpeg_bits_tell(reader); 0 == ps_demuxer_find_startcode(reader); off = mpeg_bits_tell(reader))
+    {
+        r = MPEG_ERROR_OK;
+        v8 = mpeg_bits_read8(reader);
+        if (mpeg_bits_error(reader))
+            break;
+
+        if (!ps->sync && v8 != PES_SID_START)
+        {
+            // backward 1-step
+            mpeg_bits_seek(reader, mpeg_bits_tell(reader) - 1);
+            assert(0 == mpeg_bits_error(reader));
+            continue; // wait for 00 00 01 BA
+        }
+
+        // fix HIK H.265: 00 00 01 BA 00 00 01 E0 ...
+        if (0x000001 == (mpeg_bits_tryread(reader, 3) & 0xFFFFFF))
+            continue;
+
+        switch (v8)
+        {
+        case PES_SID_START:
+            r = pack_header_read(&ps->pkhd, reader);
+            r = MPEG_ERROR_OK == r ? ps_sync_start_probe(reader) : r;
+            ps->start = MPEG_ERROR_OK == r ? 1 : ps->start;
+            ps->sync = MPEG_ERROR_OK == r ? 1 : 0;
+            break;
+            
+        case PES_SID_SYS:
+            r = system_header_read(&ps->system, reader);
+            break;
+            
+        case PES_SID_END:
+            r = MPEG_ERROR_OK;
+            break;
+
+        case PES_SID_PSM:
+            n = ps->psm.stream_count;
+            r = psm_read(&ps->psm, reader);
+            if (n != ps->psm.stream_count)
+                ps_demuxer_notify(ps); // TODO: check psm stream sid
+            break;
+
+        case PES_SID_PSD:
+            r = psd_read(&ps->psd, reader);
+            break;
+
+        case PES_SID_PRIVATE_2:
+        case PES_SID_ECM:
+        case PES_SID_EMM:
+        case PES_SID_DSMCC:
+        case PES_SID_H222_E:
+            // stream data
+        case PES_SID_PADDING:
+            // padding
+            mpeg_bits_skip(reader, mpeg_bits_read16(reader));
+            r = mpeg_bits_error(reader) ? MPEG_ERROR_NEED_MORE_DATA : MPEG_ERROR_OK;
+            break;
+
+        // ffmpeg mpeg.c mpegps_read_pes_header
+        //case 0x1c0:
+        //case 0x1df:
+        //case 0x1e0:
+        //case 0x1ef:
+        //case 0x1bd:
+        //case 0x01fd:
+        //	break;
+
+        default:
+            pes = psm_fetch(&ps->psm, v8);
+            if (pes)
+            {
+                pes->sid = v8;
+                r = ps->pkhd.mpeg2 ? pes_read_header(pes, reader) : pes_read_mpeg1_header(pes, reader);
+                if (MPEG_ERROR_OK == r)
+                {
+#if defined(MPEG_ZERO_PAYLOAD_LENGTH)
+                    // fix H.264/H.265 ps payload zero-length
+                    if (0 == pes->len && 0xE0 <= pes->sid && pes->sid <= 0xEF)
+                    {
+                        r = ps_demuxer_find_pes_start(reader);
+                        if (-1 == r)
+                            return (int)off;
+
+                        pes->len = r;
+                        r = MPEG_ERROR_OK;
+                    }
+#endif
+
+                    ps->pes = pes;
+                    ps->pes_length = 0; // init
+                    ps->state = PS_DEMUXER_STATE_DATA; // next state: handle packet
+                    return (int)mpeg_bits_tell(reader);
+                }
+            }
+            else // pes == NULL
+            {
+                r = ps_demuxer_skip(ps, reader, v8);
+            }
+            break;
+        }
+
+        if (r < 0)
+            return r; // user handler error
+        else if (r == MPEG_ERROR_NEED_MORE_DATA)
+            break;
+    }
+
+    return (int)off;
+}
+
+static int ps_demuxer_buffer(struct ps_demuxer_t* ps, const uint8_t* data, size_t bytes)
+{
+    void* ptr;
+    if (ps->buffer.len + bytes > ps->buffer.cap)
+    {
+        if (ps->buffer.len + bytes > N_BUFFER_MAX)
+            return -E2BIG;
+
+        ptr = realloc(ps->buffer.ptr == (uint8_t*)(ps + 1) ? NULL : ps->buffer.ptr, ps->buffer.len + bytes + N_BUFFER_INC);
+        if (!ptr)
+            return -ENOMEM;
+
+        if (ps->buffer.ptr == (uint8_t*)(ps + 1))
+            memcpy(ptr, ps->buffer.ptr, ps->buffer.len);
+        ps->buffer.ptr = (uint8_t*)ptr;
+        ps->buffer.cap = ps->buffer.len + bytes + N_BUFFER_INC;
+    }
+
+    memmove(ps->buffer.ptr + ps->buffer.len, data, bytes);
+    ps->buffer.len += bytes;
+    return 0;
+}
+
+int ps_demuxer_input(struct ps_demuxer_t* ps, const uint8_t* data, size_t bytes)
+{
+    int r;
+    size_t i;
+    struct mpeg_bits_t reader;
+
+    for(i = 0; i < bytes; )
+    {
+        switch (ps->state)
+        {
+        case PS_DEMUXER_STATE_START:
+            mpeg_bits_init2(&reader, ps->buffer.ptr, ps->buffer.len, data + i, bytes - i);
+
+            r = ps_demuxer_header(ps, &reader);
+            if (r >= 0)
+            {
+                assert(r <= ps->buffer.len + (bytes - i));
+                if (r >= ps->buffer.len)
+                {
+                    r -= (int)ps->buffer.len;
+                    i += r;
+                    ps->buffer.len = 0;
+                }
+                else if(r > 0)
+                {
+                    memmove(ps->buffer.ptr, ps->buffer.ptr + r, ps->buffer.len - r);
+                    ps->buffer.len -= r;
+                }
+                else
+                {
+                    assert(0 == r);
+                }
+
+                if (PS_DEMUXER_STATE_START == ps->state && i < bytes)
+                {
+                    // stash buffer
+                    r = ps_demuxer_buffer(ps, data + i, bytes - i);
+                    return 0 == r ? (int)bytes : r;
+                }
+            }
+            break;
+
+        case PS_DEMUXER_STATE_DATA:
+            assert(0 == ps->buffer.len);
+
+            assert(ps->pes && ps->pes_length <= ps->pes->len);
+            if (bytes - i >= ps->pes->len - ps->pes_length)
+            {
+                r = ps_demuxer_packet(ps, data + i, ps->pes->len - ps->pes_length);
+                i += ps->pes->len - ps->pes_length;
+                ps->pes_length = 0;
+                ps->start = 0; // clear start flag
+                ps->state = PS_DEMUXER_STATE_START; // next round
+            }
+            else
+            {
+                // need more data
+                r = ps_demuxer_packet(ps, data + i, bytes - i);
+                ps->pes_length += bytes - i;
+                i = bytes;
+            }
+
+            break;
+
+        default:
+            assert(0);
+            return -1;
+        }
+
+        if (r < 0)
+        {
+            ps->state = PS_DEMUXER_STATE_START; // skip error, try find next start code
+            ps->buffer.len = 0; // clear buffer
+            return r;
+        }
+    }
+
+    return (int)bytes;
+}
+
+struct ps_demuxer_t* ps_demuxer_create(ps_demuxer_onpacket onpacket, void* param)
+{
+	struct ps_demuxer_t* ps;
+	ps = calloc(1, sizeof(struct ps_demuxer_t) + N_BUFFER_INIT);
+	if(!ps)
 		return NULL;
 
-	memset(unpacker, 0, sizeof(struct mpeg_ps_unpacker_t));
-	unpacker->func = func;
-	unpacker->param = param;
-	return unpacker;
+    ps->state = PS_DEMUXER_STATE_START;
+    ps->pkhd.mpeg2 = 1;
+    ps->onpacket = onpacket;
+	ps->param = param;
+
+    ps->buffer.ptr = (uint8_t*)(ps + 1);
+    ps->buffer.cap = N_BUFFER_INIT;
+	return ps;
 }
 
-int mpeg_ps_unpacker_destroy(void* unpacker)
+int ps_demuxer_destroy(struct ps_demuxer_t* ps)
 {
-	struct mpeg_ps_unpacker_t* ptr;
-	ptr = (struct mpeg_ps_unpacker_t*)unpacker;
-	free(ptr);
+    size_t i;
+    struct pes_t* pes;
+    for (i = 0; i < ps->psm.stream_count; i++)
+    {
+        pes = &ps->psm.streams[i];
+        if (pes->pkt.data)
+            free(pes->pkt.data);
+        pes->pkt.data = NULL;
+    }
+
+    if (ps->buffer.ptr != (uint8_t*)(ps + 1))
+    {
+        assert(ps->buffer.cap > N_BUFFER_INIT);
+        free(ps->buffer.ptr);
+        ps->buffer.ptr = NULL;
+    }
+	free(ps);
 	return 0;
+}
+
+void ps_demuxer_set_notify(struct ps_demuxer_t* ps, struct ps_demuxer_notify_t *notify, void* param)
+{
+    ps->notify_param = param;
+    memcpy(&ps->notify, notify, sizeof(ps->notify));
+}
+
+static void ps_demuxer_notify(struct ps_demuxer_t* ps)
+{
+    size_t i;
+    struct pes_t* pes;
+    if (!ps->notify.onstream)
+        return;
+
+    for (i = 0; i < ps->psm.stream_count; i++)
+    {
+        pes = &ps->psm.streams[i];
+        ps->notify.onstream(ps->notify_param, pes->pid, pes->codecid, pes->esinfo, pes->esinfo_len, i + 1 >= ps->psm.stream_count ? 1 : 0);
+    }
 }

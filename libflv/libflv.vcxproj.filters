@@ -45,6 +45,33 @@
     <ClInclude Include="include\mp3-header.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="include\flv-parser.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\mpeg4-hevc.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\mpeg4-bits.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\aom-av1.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\webm-vpx.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\opus-head.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\flv-header.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\riff-acm.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\mpeg4-vvc.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="source\flv-demuxer.c">
@@ -78,6 +105,48 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="source\mp3-header.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="source\flv-parser.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="source\mpeg4-hevc.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="source\hevc-mp4toannexb.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="source\hevc-annexbtomp4.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="source\flv-demuxer-script.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="source\mpeg4-aac-asc.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="source\aom-av1.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="source\flv-header.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="source\webm-vpx.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="source\opus-head.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="source\riff-acm.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="source\mpeg4-vvc.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="source\vvc-annexbtomp4.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="source\vvc-mp4toannexb.c">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

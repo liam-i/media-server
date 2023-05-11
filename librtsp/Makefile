@@ -15,14 +15,22 @@ INCLUDES = . \
 					$(ROOT)/include \
 					$(ROOT)/libhttp/include \
 					../librtp/include \
-					../libmpeg/include
+					../libmpeg/include \
+					../libflv/include \
+					../libmov/include \
+					../libmkv/include \
+					../../avcodec/avbsf/include \
+					../../avcodec/avcodec/include
 
 #-------------------------------Source-------------------------------
 #
 #--------------------------------------------------------------------
-SOURCE_PATHS = source client media
+SOURCE_PATHS = source source/client source/server source/utils source/sdp
 SOURCE_FILES = $(foreach dir,$(SOURCE_PATHS),$(wildcard $(dir)/*.cpp))
 SOURCE_FILES += $(foreach dir,$(SOURCE_PATHS),$(wildcard $(dir)/*.c))
+
+SOURCE_FILES += $(ROOT)/source/digest/md5.c
+SOURCE_FILES += $(ROOT)/source/base64.c
 
 #-----------------------------Library--------------------------------
 #
@@ -44,11 +52,6 @@ STATIC_LIBS =
 #
 # DEFINES := $(addprefix -D,$(DEFINES)) # add -L prefix
 #--------------------------------------------------------------------
-DEFINES =
+DEFINES = RTP_OVER_RTSP_TRY_TO_FIND_NEXT_PACKET
 
-include $(ROOT)/gcc.mk
-
-GCC_VER_GTE44 := $(shell echo `gcc -dumpversion | cut -f1-2 -d.` \< 4.4 | bc )
-ifeq ($(GCC_VER_GTE44),1)
-CFLAGS += -march=i586
-endif
+include ../gcc.mk

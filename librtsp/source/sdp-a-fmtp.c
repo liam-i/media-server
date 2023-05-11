@@ -26,7 +26,7 @@ int sdp_a_fmtp_h264(const char* fmtp, int *format, struct sdp_a_fmtp_h264_t *h26
 	// payload type
 	*format = atoi(p);
 	p1 = strchr(p, ' ');
-	if(' ' != *p1)
+	if(!p1 || ' ' != *p1)
 		return -1;
 
 	h264->flags = 0;
@@ -35,7 +35,7 @@ int sdp_a_fmtp_h264(const char* fmtp, int *format, struct sdp_a_fmtp_h264_t *h26
 	while(*p)
 	{
 		p1 = strchr(p, '=');
-		if('=' != *p1)
+		if(!p1 || '=' != *p1)
 			return -1;
 
 		p2 = strchr(p1+1, ';');
@@ -225,6 +225,83 @@ int sdp_a_fmtp_h264(const char* fmtp, int *format, struct sdp_a_fmtp_h264_t *h26
 	return 0;
 }
 
+// RFC7798 RTP Payload Format for High Efficiency Video Coding (HEVC)
+// m=video 49170 RTP/AVP 98
+// a=rtpmap:98 H265/90000
+// a=fmtp:98 profile-id=1; sprop-vps=<video parameter sets data>
+int sdp_a_fmtp_h265(const char* fmtp, int *format, struct sdp_a_fmtp_h265_t *h265)
+{
+	size_t nc;
+	const char *p1, *p2;
+	const char *p = fmtp;
+
+	// payload type
+	*format = atoi(p);
+	p1 = strchr(p, ' ');
+	if (!p1 || ' ' != *p1)
+		return -1;
+
+	h265->flags = 0;
+	assert(' ' == *p1);
+	p = p1 + 1;
+	while (*p)
+	{
+		p1 = strchr(p, '=');
+		if (!p1 || '=' != *p1)
+			return -1;
+
+		p2 = strchr(p1 + 1, ';');
+		if (!p2)
+			p2 = p1 + strlen(p1);
+
+		while (' ' == *p) p++; // skip space
+
+		nc = (size_t)(p1 - p); // ptrdiff_t to size_t
+		//vc = (size_t)(p2 - p1 - 1); // ptrdiff_t to size_t
+		switch (*p)
+		{
+		case 'i':
+			// interop-constraints
+			break;
+		case 'l':
+			// level-id
+			break;
+		case 'p':
+			// profile-space
+			// profile-id
+			// profile-compatibility-indicator
+			break;
+
+		case 's':
+			// sprop-vps
+			// sprop-sps
+			// sprop-pps
+			// sprop-sei
+			if (0 == strncasecmp("sprop-vps", p, nc))
+			{
+			}
+			else if (0 == strncasecmp("sprop-sps", p, nc))
+			{
+			}
+			else if (0 == strncasecmp("sprop-pps", p, nc))
+			{
+			}
+			else if (0 == strncasecmp("sprop-sei", p, nc))
+			{
+			}
+			break;
+
+		case 't':
+			// tier-flag
+			break;
+		}
+
+		p = *p2 ? p2 + 1 : p2;
+	}
+
+	return 0;
+}
+
 // RFC3640 RTP Payload Format for Transport of MPEG-4 Elementary Streams
 // m=audio 49230 RTP/AVP 96
 // a=rtpmap:96 mpeg4-generic/16000/1
@@ -244,7 +321,7 @@ int sdp_a_fmtp_mpeg4(const char* fmtp, int *format, struct sdp_a_fmtp_mpeg4_t *m
 	// payload type
 	*format = atoi(p);
 	p1 = strchr(p, ' ');
-	if(' ' != *p1)
+	if(!p1 || ' ' != *p1)
 		return -1;
 
 	mpeg4->flags = 0;
@@ -253,7 +330,7 @@ int sdp_a_fmtp_mpeg4(const char* fmtp, int *format, struct sdp_a_fmtp_mpeg4_t *m
 	while(*p)
 	{
 		p1 = strchr(p, '=');
-		if('=' != *p1)
+		if(!p1 || '=' != *p1)
 			return -1;
 
 		p2 = strchr(p1+1, ';');
@@ -419,6 +496,59 @@ int sdp_a_fmtp_mpeg4(const char* fmtp, int *format, struct sdp_a_fmtp_mpeg4_t *m
 	return 0;
 }
 
+// RFC4588 RTP Retransmission Payload Format
+// a=fmtp:<number> apt=<apt-value>;rtx-time=<rtx-time-val>
+int sdp_a_fmtp_rtx(const char* fmtp, int* format, struct sdp_a_fmtp_rtx_t* rtx)
+{
+	size_t nc, vc;
+	const char* p1, * p2;
+	const char* p = fmtp;
+
+	// payload type
+	*format = atoi(p);
+	p1 = strchr(p, ' ');
+	if (!p1 || ' ' != *p1)
+		return -1;
+
+	assert(' ' == *p1);
+	p = p1 + 1;
+	while (*p)
+	{
+		p1 = strchr(p, '=');
+		if (!p1 || '=' != *p1)
+			return -1;
+
+		p2 = strchr(p1 + 1, ';');
+		if (!p2)
+			p2 = p1 + strlen(p1);
+
+		while (' ' == *p) p++; // skip space
+
+		nc = (size_t)(p1 - p); // ptrdiff_t to size_t
+		vc = (size_t)(p2 - p1 - 1); // ptrdiff_t to size_t
+		switch (*p)
+		{
+		case 'a':
+			if (0 == strncasecmp("apt", p, nc))
+			{
+				rtx->apt = atoi(p1 + 1);
+			}
+			break;
+
+		case 'r':
+			if (0 == strncasecmp("rtx-time", p, nc))
+			{
+				rtx->rtx_time = atoi(p1 + 1);
+			}
+			break;
+		}
+
+		p = *p2 ? p2 + 1 : p2;
+	}
+
+	return 0;
+}
+
 #if defined(DEBUG) || defined(_DEBUG)
 static void sdp_a_fmtp_h264_test(void)
 {
@@ -438,9 +568,9 @@ static void sdp_a_fmtp_mpeg4_test(void)
 {
 	int format = 0;
 	struct sdp_a_fmtp_mpeg4_t mpeg4;
-	const char* fmtp1 = "96 streamType=3;profile-level-id=1807; mode=generic;objectType=2; config=0842237F24001FB400094002C0;sizeLength=10;CTSDeltaLength=16;randomAccessIndication=1;streamStateIndication=4";
-
-	assert(0 == sdp_a_fmtp_mpeg4(fmtp1, &format, &mpeg4));
+	const char* fmtp = "96 streamType=3;profile-level-id=1807; mode=generic;objectType=2; config=0842237F24001FB400094002C0;sizeLength=10;CTSDeltaLength=16;randomAccessIndication=1;streamStateIndication=4";
+	
+	assert(0 == sdp_a_fmtp_mpeg4(fmtp, &format, &mpeg4));
 	assert(96 == format);
 	assert(mpeg4.flags == (SDP_A_FMTP_MPEG4_OBJECTTYPE|SDP_A_FMTP_MPEG4_SIZELENGTH|SDP_A_FMTP_MPEG4_CTSDELTALENGTH|SDP_A_FMTP_MPEG4_RANDOMACCESSINDICATION|SDP_A_FMTP_MPEG4_STREAMSTATEINDICATION));
 	assert(3 == mpeg4.streamType);
@@ -454,9 +584,38 @@ static void sdp_a_fmtp_mpeg4_test(void)
 	assert(4 == mpeg4.streamStateIndication);
 }
 
+static void sdp_a_fmtp_mpeg4_aac_test(void)
+{
+	int format = 0;
+	struct sdp_a_fmtp_mpeg4_t mpeg4;
+	const char* fmtp = "97 streamtype=5;profile-level-id=1;mode=AAC-hbr;sizelength=13;indexlength=3;indexdeltalength=3;config=131056E59D4800";
+
+	assert(0 == sdp_a_fmtp_mpeg4(fmtp, &format, &mpeg4));
+	assert(97 == format);
+	assert(mpeg4.flags == (SDP_A_FMTP_MPEG4_SIZELENGTH | SDP_A_FMTP_MPEG4_INDEXLENGTH | SDP_A_FMTP_MPEG4_INDEXDELTALENGTH));
+	assert(5 == mpeg4.streamType);
+	assert(0 == strcmp("1", mpeg4.profile_level_id));
+	assert(5 == mpeg4.mode);
+	assert(0 == strcmp(mpeg4.config, "131056E59D4800"));
+	assert(13 == mpeg4.sizeLength);
+	assert(3 == mpeg4.indexLength);
+	assert(3 == mpeg4.indexDeltaLength);
+}
+
+static void sdp_a_fmtp_rtx_test(void)
+{
+	int format = 0;
+	struct sdp_a_fmtp_rtx_t rtx;
+	const char* fmtp = "111 apt=97;rtx-time=3000";
+	assert(0 == sdp_a_fmtp_rtx(fmtp, &format, &rtx));
+	assert(111 == format && 97 == rtx.apt && 3000 == rtx.rtx_time);
+}
+
 void sdp_a_fmtp_test(void)
 {
 	sdp_a_fmtp_h264_test();
 	sdp_a_fmtp_mpeg4_test();
+	sdp_a_fmtp_mpeg4_aac_test();
+	sdp_a_fmtp_rtx_test();
 }
 #endif

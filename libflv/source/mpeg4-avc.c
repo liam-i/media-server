@@ -1,4 +1,5 @@
 #include "mpeg4-avc.h"
+#include <stdio.h>
 #include <string.h>
 #include <assert.h>
 
@@ -10,9 +11,9 @@ aligned(8) class AVCDecoderConfigurationRecord {
 	unsigned int(8) AVCProfileIndication;
 	unsigned int(8) profile_compatibility;
 	unsigned int(8) AVCLevelIndication;
-	bit(6) reserved = ¡®111111¡¯b;
+	bit(6) reserved = '111111'b;
 	unsigned int(2) lengthSizeMinusOne;
-	bit(3) reserved = ¡®111¡¯b;
+	bit(3) reserved = '111'b;
 
 	unsigned int(5) numOfSequenceParameterSets;
 	for (i=0; i< numOfSequenceParameterSets; i++) {
@@ -29,11 +30,11 @@ aligned(8) class AVCDecoderConfigurationRecord {
 	if( profile_idc == 100 || profile_idc == 110 || 
 		profile_idc == 122 || profile_idc == 144 )
 	{
-		bit(6) reserved = ¡®111111¡¯b;
+		bit(6) reserved = '111111'b;
 		unsigned int(2) chroma_format;
-		bit(5) reserved = ¡®11111¡¯b;
+		bit(5) reserved = '11111'b;
 		unsigned int(3) bit_depth_luma_minus8;
-		bit(5) reserved = ¡®11111¡¯b;
+		bit(5) reserved = '11111'b;
 		unsigned int(3) bit_depth_chroma_minus8;
 		unsigned int(8) numOfSequenceParameterSetExt;
 		for (i=0; i< numOfSequenceParameterSetExt; i++) {
@@ -43,11 +44,12 @@ aligned(8) class AVCDecoderConfigurationRecord {
 	}
 }
 */
-int mpeg4_avc_decoder_configuration_record_load(const uint8_t* data, size_t bytes, struct mpeg4_avc_t* avc)
+static int _mpeg4_avc_decoder_configuration_record_load(const uint8_t* data, size_t bytes, struct mpeg4_avc_t* avc)
 {
-	uint8_t i;
+    uint8_t i;
 	uint32_t j;
 	uint16_t len;
+    uint8_t *p, *end;
 	
 	if (bytes < 7) return -1;
 	assert(1 == data[0]);
@@ -64,22 +66,25 @@ int mpeg4_avc_decoder_configuration_record_load(const uint8_t* data, size_t byte
 	}
 
 	j = 6;
+    p = avc->data;
+    end = avc->data + sizeof(avc->data);
 	for (i = 0; i < avc->nb_sps && j + 2 < bytes; ++i)
 	{
 		len = (data[j] << 8) | data[j + 1];
-		if (len + j + 2 >= bytes // data length + sps length
-			|| len >= sizeof(avc->sps[i].data))
+		if (j + 2 + len >= bytes || p + len > end)
 		{
 			assert(0);
 			return -1;
 		}
 
-		memcpy(avc->sps[i].data, data + j + 2, len);
+		memcpy(p, data + j + 2, len);
+        avc->sps[i].data = p;
 		avc->sps[i].bytes = len;
 		j += len + 2;
+        p += len;
 	}
 
-	if (j+1 >= bytes || data[j] > sizeof(avc->pps) / sizeof(avc->pps[0]))
+	if (j >= bytes || (unsigned int)data[j] > sizeof(avc->pps) / sizeof(avc->pps[0]))
 	{
 		assert(0);
 		return -1;
@@ -89,15 +94,20 @@ int mpeg4_avc_decoder_configuration_record_load(const uint8_t* data, size_t byte
 	for (i = 0; i < avc->nb_pps && j + 2 < bytes; i++)
 	{
 		len = (data[j] << 8) | data[j + 1];
-		if (len + j + 2 > bytes // data length + pps length
-			|| len >= sizeof(avc->pps[i].data))
-			return -1;
+        if (j + 2 + len > bytes || p + len > end)
+        {
+            assert(0);
+            return -1;
+        }
 
-		memcpy(avc->pps[i].data, data + j + 2, len);
+		memcpy(p, data + j + 2, len);
+        avc->pps[i].data = p;
 		avc->pps[i].bytes = len;
 		j += len + 2;
+        p += len;
 	}
 
+	avc->off = (int)(p - avc->data);
 	return j;
 }
 
@@ -166,6 +176,13 @@ int mpeg4_avc_decoder_configuration_record_save(const struct mpeg4_avc_t* avc, u
 
 #define H264_STARTCODE(p) (p[0]==0 && p[1]==0 && (p[2]==1 || (p[2]==0 && p[3]==1)))
 
+int mpeg4_avc_from_nalu(const uint8_t* data, size_t bytes, struct mpeg4_avc_t* avc)
+{
+	int r;
+	r = h264_annexbtomp4(avc, data, bytes, NULL, 0, NULL, NULL);
+	return avc->nb_sps > 0 && avc->nb_pps > 0 ? bytes : r;
+}
+
 int mpeg4_avc_to_nalu(const struct mpeg4_avc_t* avc, uint8_t* data, size_t bytes)
 {
 	uint8_t i;
@@ -208,7 +225,27 @@ int mpeg4_avc_to_nalu(const struct mpeg4_avc_t* avc, uint8_t* data, size_t bytes
 	return (int)k;
 }
 
+int mpeg4_avc_codecs(const struct mpeg4_avc_t* avc, char* codecs, size_t bytes)
+{
+	// https://tools.ietf.org/html/rfc6381#section-3.3
+	// https://developer.mozilla.org/en-US/docs/Web/Media/Formats/codecs_parameter
+    return snprintf(codecs, bytes, "avc1.%02x%02x%02x", avc->profile, avc->compatibility, avc->level);
+}
+
+int mpeg4_avc_decoder_configuration_record_load(const uint8_t* data, size_t bytes, struct mpeg4_avc_t* avc)
+{
+	int r;
+	r = _mpeg4_avc_decoder_configuration_record_load(data, bytes, avc);
+	if (r > 0 && avc->nb_sps > 0 && avc->nb_pps > 0)
+		return r;
+
+	// try annexb
+	memset(avc, 0, sizeof(*avc));
+	return mpeg4_avc_from_nalu(data, bytes, avc);
+}
+
 #if defined(_DEBUG) || defined(DEBUG)
+void mpeg4_annexbtomp4_test(void);
 void mpeg4_avc_test(void)
 {
 	const unsigned char src[] = {
@@ -229,8 +266,12 @@ void mpeg4_avc_test(void)
 	assert(4 == avc.nalu && 1 == avc.nb_sps && 1 == avc.nb_pps);
 	assert(sizeof(src) == mpeg4_avc_decoder_configuration_record_save(&avc, data, sizeof(data)));
 	assert(0 == memcmp(src, data, sizeof(src)));
+    mpeg4_avc_codecs(&avc, (char*)data, sizeof(data));
+    assert(0 == memcmp("avc1.42e01e", data, 11));
 
 	assert(sizeof(nalu) == mpeg4_avc_to_nalu(&avc, data, sizeof(data)));
 	assert(0 == memcmp(nalu, data, sizeof(nalu)));
+
+	mpeg4_annexbtomp4_test();
 }
 #endif

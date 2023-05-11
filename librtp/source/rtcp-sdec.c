@@ -3,31 +3,40 @@
 #include "rtp-internal.h"
 #include "rtp-util.h"
 
-void rtcp_sdes_unpack(struct rtp_context *ctx, rtcp_header_t *header, const unsigned char* ptr)
+void rtcp_sdes_unpack(struct rtp_context *ctx, const rtcp_header_t *header, const uint8_t* ptr, size_t bytes)
 {
 	uint32_t i;
-	uint32_t ssrc;
+	struct rtcp_msg_t msg;
 	struct rtp_member *member;
-	const unsigned char *p;
+	const unsigned char *p, *end;
 
-	assert(header->length >= header->rc * 4 + 4);
 	p = ptr;
-	for(i = 0; i < header->rc; i++)
+	end = ptr + bytes;
+	assert(header->length >= header->rc);
+
+	for (i = 0; i < header->rc && p + 8 /*4-ssrc + 1-PT*/ <= end; i++)
 	{
-		ssrc = nbo_r32(p);
-		member = rtp_member_fetch(ctx, ssrc);
-		if(!member)
-			continue;
+		msg.ssrc = nbo_r32(p);
+		member = rtp_member_fetch(ctx, msg.ssrc);
+		if (!member) {
+			//continue;
+		}
 
 		p += 4;
-		while(RTCP_SDES_END != p[0] /*PT*/)
+		while(p + 2 <= end && RTCP_SDES_END != p[0] /*PT*/)
 		{
-			rtcp_sdes_item_t item;
-			item.pt = p[0];
-			item.len = p[1];
-			item.data = (unsigned char*)(p+2);
+			msg.u.sdes.pt = p[0];
+			msg.u.sdes.len = p[1];
+			msg.u.sdes.data = (unsigned char*)(p+2);
+			if (p + 2 + msg.u.sdes.len > end)
+			{
+				assert(0);
+				return; // error
+			}
 
-			switch(item.pt)
+			ctx->handler.on_rtcp(ctx->cbparam, &msg);
+
+			switch(msg.u.sdes.pt)
 			{
 			case RTCP_SDES_CNAME:
 			case RTCP_SDES_NAME:
@@ -36,21 +45,22 @@ void rtcp_sdes_unpack(struct rtp_context *ctx, rtcp_header_t *header, const unsi
 			case RTCP_SDES_LOC:
 			case RTCP_SDES_TOOL:
 			case RTCP_SDES_NOTE:
-				rtp_member_setvalue(member, item.pt, item.data, item.len);
+				rtp_member_setvalue(member, msg.u.sdes.pt, msg.u.sdes.data, msg.u.sdes.len);
 				break;
 
 			case RTCP_SDES_PRIVATE:
-				assert(0);
+				//assert(0);
 				break;
 
 			default:
-				assert(0);
+				//assert(0);
+				break;
 			}
 
 			// RFC3550 6.5 SDES: Source Description RTCP Packet
 			// Items are contiguous, i.e., items are not individually padded to a 32-bit boundary. 
 			// Text is not null terminated because some multi-octet encodings include null octets.
-			p += 2 + item.len;
+			p += 2 + msg.u.sdes.len;
 		}
 
 		// RFC3550 6.5 SDES: Source Description RTCP Packet
@@ -76,9 +86,9 @@ static size_t rtcp_sdes_append_item(unsigned char *ptr, size_t bytes, rtcp_sdes_
 	return sdes->len+2;
 }
 
-size_t rtcp_sdes_pack(struct rtp_context *ctx, unsigned char* ptr, size_t bytes)
+int rtcp_sdes_pack(struct rtp_context *ctx, uint8_t* ptr, int bytes)
 {
-	size_t n;
+	int n;
 	rtcp_header_t header;
 
 	// must have CNAME
@@ -91,7 +101,7 @@ size_t rtcp_sdes_pack(struct rtp_context *ctx, unsigned char* ptr, size_t bytes)
 	header.rc = 1; // self only
 	header.length = 0;
 
-	n = rtcp_sdes_append_item(ptr+8, bytes-8, &ctx->self->sdes[RTCP_SDES_CNAME]);
+	n = (int)rtcp_sdes_append_item(ptr+8, bytes-8, &ctx->self->sdes[RTCP_SDES_CNAME]);
 	if(bytes < 8 + n)
 		return 8 + n;
 
@@ -102,7 +112,7 @@ size_t rtcp_sdes_pack(struct rtp_context *ctx, unsigned char* ptr, size_t bytes)
 		assert(ctx->rtcp_cycle/3 < RTCP_SDES_PRIVATE);
 		if(ctx->self->sdes[ctx->rtcp_cycle/3+1].data) // skip RTCP_SDES_END
 		{
-			n += rtcp_sdes_append_item(ptr+8+n, bytes-n-8, &ctx->self->sdes[ctx->rtcp_cycle/3+1]);
+			n += (int)rtcp_sdes_append_item(ptr+8+n, bytes-n-8, &ctx->self->sdes[ctx->rtcp_cycle/3+1]);
 			if(n + 8 > bytes)
 				return n + 8;
 		}

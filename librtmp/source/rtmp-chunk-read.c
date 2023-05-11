@@ -72,42 +72,19 @@ static struct rtmp_packet_t* rtmp_packet_parse(struct rtmp_t* rtmp, const uint8_
 static int rtmp_packet_alloc(struct rtmp_t* rtmp, struct rtmp_packet_t* packet)
 {
 	void* p;
+	(void)rtmp;
 
-	if (packet->header.length < 1 || packet->header.length > 512 * 1024 * 1024)
+	// 24-bytes length
+	assert(0 == packet->bytes);
+	assert(packet->header.length < (1 << 24));
+	// fixed SMS (Chinacache Smart Media Server) packet->header.length = 0
+	if (0 == packet->capacity || packet->capacity < packet->header.length)
 	{
-		assert(0); // invalid packet
-		return E2BIG;
-	}
-
-	if (packet->header.type == RTMP_TYPE_VIDEO || packet->header.type == RTMP_TYPE_AUDIO)
-	{
-		if (0 == packet->bytes)
-		{
-			p = rtmp->alloc(rtmp->param, RTMP_TYPE_VIDEO == packet->header.type ? 1 : 0, packet->header.length);
-			if (NULL == p)
-				return ENOMEM;
-			packet->payload = p;
-			packet->capacity = packet->header.length;
-		}
-		else
-		{
-			if (packet->capacity != packet->header.length)
-			{
-				assert(0); // miss chunk ???
-				return ENOMEM;
-			}
-		}
-	}
-	else
-	{
-		if (packet->capacity < packet->header.length)
-		{
-			p = realloc(packet->payload, packet->header.length + 1024);
-			if (NULL == p)
-				return ENOMEM;
-			packet->payload = p;
-			packet->capacity = packet->header.length + 1024;
-		}
+		p = realloc(packet->payload, packet->header.length + 1024);
+		if (NULL == p)
+			return -ENOMEM;
+		packet->payload = p;
+		packet->capacity = packet->header.length + 1024;
 	}
 
 	return 0;
@@ -117,8 +94,10 @@ int rtmp_chunk_read(struct rtmp_t* rtmp, const uint8_t* data, size_t bytes)
 {
 	const static uint32_t s_header_size[] = { 11, 7, 3, 0 };
 
-	int r;
+	int r, invalid_extended_timestamp;
 	size_t size, offset = 0;
+	uint8_t extended_timestamp_buffer[4];
+	uint32_t extended_timestamp = 0;
 	struct rtmp_parser_t* parser = &rtmp->parser;
 	struct rtmp_chunk_header_t header;
 
@@ -172,10 +151,11 @@ int rtmp_chunk_read(struct rtmp_t* rtmp, const uint8_t* data, size_t bytes)
 			break;
 
 		case RTMP_PARSE_EXTENDED_TIMESTAMP:
-			if (NULL == parser->pkt) return ENOMEM;
+			if (NULL == parser->pkt) return -ENOMEM;
 
+			assert(parser->pkt->header.timestamp <= 0xFFFFFF);
 			size = s_header_size[parser->pkt->header.fmt] + parser->basic_bytes;
-			if (parser->pkt->header.timestamp >= 0xFFFFFF) size += 4;
+			if (parser->pkt->header.timestamp == 0xFFFFFF) size += 4; // extended timestamp
 
 			assert(parser->bytes <= size);
 			while (parser->bytes < size && offset < bytes)
@@ -186,23 +166,59 @@ int rtmp_chunk_read(struct rtmp_t* rtmp, const uint8_t* data, size_t bytes)
 			assert(parser->bytes <= size);
 			if (parser->bytes >= size)
 			{
-				// parse extended timestamp
-				rtmp_chunk_extended_timestamp_read(parser->buffer + s_header_size[parser->buffer[0] >> 6] + parser->basic_bytes, &parser->pkt->header.timestamp);
-				if(0 == parser->pkt->bytes) // first chunk
-					parser->pkt->clock = (RTMP_CHUNK_TYPE_0 == parser->pkt->header.fmt) ? parser->pkt->header.timestamp : (parser->pkt->clock + parser->pkt->header.timestamp);
+				invalid_extended_timestamp = 0;
+				extended_timestamp = parser->pkt->header.timestamp;
+				if (parser->pkt->header.timestamp == 0xFFFFFF)
+				{
+					// parse extended timestamp
+					rtmp_chunk_extended_timestamp_read(parser->buffer + s_header_size[parser->buffer[0] >> 6] + parser->basic_bytes, &extended_timestamp);
+					if (RTMP_CHUNK_TYPE_3 == parser->pkt->header.fmt && extended_timestamp != parser->pkt->delta) 
+					{
+						// fix code offset -= 4 on offset < 4;
+						invalid_extended_timestamp = 1;
+						memcpy(extended_timestamp_buffer, parser->buffer + s_header_size[parser->buffer[0] >> 6] + parser->basic_bytes, 4);
+					}
+				}
+
+				// first chunk
+				if (0 == parser->pkt->bytes)
+				{
+					parser->pkt->delta = extended_timestamp;
+
+					// handle timestamp/delta
+					if (RTMP_CHUNK_TYPE_0 == parser->pkt->header.fmt)
+						parser->pkt->clock = parser->pkt->delta;
+					else
+						parser->pkt->clock += parser->pkt->delta;
+
+					if (0 != rtmp_packet_alloc(rtmp, parser->pkt))
+						return -ENOMEM;
+				}
 				parser->state = RTMP_PARSE_PAYLOAD;
+
+				// rewind extended_timestamp_buffer
+				if (invalid_extended_timestamp)
+				{
+					r = rtmp_chunk_read(rtmp, extended_timestamp_buffer, 4);
+					if (0 != r) return r;
+				}	
 			}
 			break;
 
 		case RTMP_PARSE_PAYLOAD:
-			assert(parser->pkt);
-			if (0 != rtmp_packet_alloc(rtmp, parser->pkt))
-				return ENOMEM;
-			assert(parser->pkt->bytes < parser->pkt->header.length);
-			assert(parser->pkt->capacity >= parser->pkt->header.length);
+			if (NULL == parser->pkt || NULL == parser->pkt->payload 
+				|| parser->pkt->bytes > parser->pkt->capacity 
+				|| parser->pkt->bytes > parser->pkt->header.length 
+				|| parser->pkt->header.length > parser->pkt->capacity)
+			{
+				assert(0);
+				return -ENOMEM;
+			}
+			//assert(parser->pkt->bytes <= parser->pkt->header.length);
+			//assert(parser->pkt->capacity >= parser->pkt->header.length);
 			size = MIN(rtmp->in_chunk_size - (parser->pkt->bytes % rtmp->in_chunk_size), parser->pkt->header.length - parser->pkt->bytes);
 			size = MIN(size, bytes - offset);
-			memcpy(parser->pkt->payload + parser->pkt->bytes, data + offset, size);
+			if(size > 0) memcpy(parser->pkt->payload + parser->pkt->bytes, data + offset, size);
 			parser->pkt->bytes += size;
 			offset += size;
 
@@ -217,7 +233,7 @@ int rtmp_chunk_read(struct rtmp_t* rtmp, const uint8_t* data, size_t bytes)
 				r = rtmp_handler(rtmp, &header, parser->pkt->payload);
 				if(0 != r) return r;
 			}
-			else if (0 == parser->pkt->bytes % rtmp->in_chunk_size)
+			else if (0 == (parser->pkt->bytes % rtmp->in_chunk_size))
 			{
 				// next chunk
 				parser->state = RTMP_PARSE_INIT;

@@ -3,42 +3,36 @@
 #include "rtp-internal.h"
 #include "rtp-util.h"
 
-void rtcp_app_unpack(struct rtp_context *ctx, rtcp_header_t *header, const unsigned char* ptr)
+void rtcp_app_unpack(struct rtp_context *ctx, const rtcp_header_t *header, const uint8_t* ptr, size_t bytes)
 {
 	struct rtcp_msg_t msg;
-	struct rtp_member *member;
+	//struct rtp_member *member;
 
-	assert(header->length*4 >= 8);
-	if(header->length < 8) // RTCP header + SSRC + name
+	if (bytes < 8) // RTCP header + SSRC + name
+	{
+		assert(0);
 		return;
+	}
 
-	msg.type = RTCP_MSG_APP;
-	msg.u.app.ssrc = nbo_r32(ptr);
+	msg.ssrc = nbo_r32(ptr);
+	msg.type = RTCP_APP;
 
-	member = rtp_member_fetch(ctx, msg.u.app.ssrc);
-	if(!member) return; // error	
+	//member = rtp_member_fetch(ctx, msg.ssrc);
+	//if(!member) return; // error	
 
+	msg.u.app.subtype = header->rc;
 	memcpy(msg.u.app.name, ptr+4, 4);
-
-	if(header->length > 8)
-	{
-		msg.u.app.data = (void*)(ptr + 8);
-		msg.u.app.bytes = header->length * 4 - 8;
-	}
-	else
-	{
-		msg.u.app.data = NULL;
-		msg.u.app.bytes = 0;
-	}
-
+	msg.u.app.data = (void*)(ptr + 8);
+	msg.u.app.bytes = (int)bytes - 8;
+	
 	ctx->handler.on_rtcp(ctx->cbparam, &msg);
 }
 
-size_t rtcp_app_pack(struct rtp_context *ctx, unsigned char* ptr, size_t bytes, const char name[4], const void* app, size_t len)
+int rtcp_app_pack(struct rtp_context *ctx, uint8_t* ptr, int bytes, const char name[4], const void* app, int len)
 {
 	rtcp_header_t header;
 
-	if(bytes >= 8 + (len+3)/4*4)
+	if(bytes >= 12 + (len+3)/4*4)
 	{
 		header.v = 2;
 		header.p = 0;
@@ -54,5 +48,5 @@ size_t rtcp_app_pack(struct rtp_context *ctx, unsigned char* ptr, size_t bytes, 
 			memcpy(ptr+12, app, len);
 	}
 
-	return 8 + (len+3)/4*4;
+	return 12 + (len+3)/4*4;
 }

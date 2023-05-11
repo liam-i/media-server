@@ -1,79 +1,143 @@
 #include "mov-writer.h"
 #include "mov-format.h"
+#include "mov-udta.h"
 #include "mpeg4-aac.h"
+#include "opus-head.h"
+#include "mp3-header.h"
+#include "flv-proto.h"
 #include "flv-reader.h"
-#include "flv-demuxer.h"
+#include "flv-parser.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <assert.h>
+
+extern "C" const struct mov_buffer_t* mov_file_buffer(void);
+extern "C" int mov_writer_add_udta(mov_writer_t * mov, const void* data, size_t size);
 
 static uint8_t s_buffer[2 * 1024 * 1024];
 static int s_width, s_height;
 
-static void onFLV(void* mov, int type, const void* data, size_t bytes, uint32_t pts, uint32_t dts)
+static int onFLV(void* param, int codec, const void* data, size_t bytes, uint32_t pts, uint32_t dts, int flags)
 {
-	if (FLV_AAC == type)
+	mov_writer_t* mov = (mov_writer_t*)param;
+	static int s_audio_track = -1;
+	static int s_video_track = -1;
+
+	switch(codec)
 	{
-		mov_writer_write_audio(mov, data, bytes, pts, dts);
-	}
-	else if (FLV_AVC == type)
-	{
-		mov_writer_write_video(mov, data, bytes, pts, dts);
-	}
-	else if (FLV_MP3 == type)
-	{
-		assert(0);
-	}
-	else if (FLV_AVC_HEADER == type)
-	{
-		static bool s_avc_track = false;
-		if (!s_avc_track)
+	case FLV_AUDIO_AAC:
+	case FLV_AUDIO_OPUS:
+		return mov_writer_write(mov, s_audio_track, data, bytes, pts, dts, 1 == flags ? MOV_AV_FLAG_KEYFREAME : 0);
+
+	case FLV_AUDIO_MP3:
+		if (-1 == s_audio_track)
 		{
-			s_avc_track = true;
-			mov_writer_video_meta(mov, MOV_AVC1, s_width, s_height, data, bytes);
+			struct mp3_header_t mp3;
+			if (0 == mp3_header_load(&mp3, data, bytes))
+				return -1;
+			s_audio_track = mov_writer_add_audio(mov, MOV_OBJECT_MP3, mp3_get_channel(&mp3), 16, mp3_get_frequency(&mp3), NULL, 0);
 		}
-	}
-	else if (FLV_AAC_HEADER == type)
-	{
-		static bool s_aac_track = false;
-		if (!s_aac_track)
+
+		if (-1 == s_audio_track)
+			return -1;
+		return mov_writer_write(mov, s_audio_track, data, bytes, pts, dts, 1 == flags ? MOV_AV_FLAG_KEYFREAME : 0);
+	
+	case FLV_AUDIO_G711A:
+	case FLV_AUDIO_G711U:
+		if (-1 == s_audio_track)
+			s_audio_track = mov_writer_add_audio(mov, codec==FLV_AUDIO_G711A?MOV_OBJECT_G711a:MOV_OBJECT_G711u, 1, 16, 8000, NULL, 0);
+		if (-1 == s_audio_track)
+			return -1;
+		return mov_writer_write(mov, s_audio_track, data, bytes, pts, dts, 0);
+
+	case FLV_VIDEO_H264:
+	case FLV_VIDEO_H265:
+	case FLV_VIDEO_AV1:
+		return mov_writer_write(mov, s_video_track, data, bytes, pts, dts, flags);
+
+	case FLV_VIDEO_AVCC:
+		if (-1 == s_video_track)
+			s_video_track = mov_writer_add_video(mov, MOV_OBJECT_H264, s_width, s_height, data, bytes);
+		break;
+
+	case FLV_VIDEO_HVCC:
+		if (-1 == s_video_track)
+			s_video_track = mov_writer_add_video(mov, MOV_OBJECT_HEVC, s_width, s_height, data, bytes);
+		break;
+
+	case FLV_VIDEO_AV1C:
+		if (-1 == s_video_track)
+			s_video_track = mov_writer_add_video(mov, MOV_OBJECT_AV1, s_width, s_height, data, bytes);
+		break;
+
+	case FLV_AUDIO_ASC:
+		if (-1 == s_audio_track)
 		{
-			s_aac_track = true;
 			struct mpeg4_aac_t aac;
 			mpeg4_aac_audio_specific_config_load((const uint8_t*)data, bytes, &aac);
 			int rate = mpeg4_aac_audio_frequency_to((enum mpeg4_aac_frequency)aac.sampling_frequency_index);
-			mov_writer_audio_meta(mov, MOV_MP4A, aac.channel_configuration, 16, rate, data, bytes);
+			s_audio_track = mov_writer_add_audio(mov, MOV_OBJECT_AAC, aac.channel_configuration, 16, rate, data, bytes);
 		}
-	}
-	else
-	{
+		break;
+	case FLV_AUDIO_OPUS_HEAD:
+		if (-1 == s_audio_track)
+		{
+			struct opus_head_t opus;
+			opus_head_load((const uint8_t*)data, bytes, &opus);
+			s_audio_track = mov_writer_add_audio(mov, MOV_OBJECT_OPUS, opus.channels, 16, opus.input_sample_rate, data, bytes);
+		}
+		break;
+
+	default:
 		// nothing to do
-		assert(0);
+		assert(FLV_SCRIPT_METADATA == codec);
 	}
 
 	printf("\n");
+	return 0;
+}
+
+static int mov_writer_add_cover(mov_writer_t* mov, const char* cover)
+{
+	static uint8_t s_cover_data[2 * 1024 * 1024];
+	static uint8_t s_udta[2 * 1024 * 1024];
+	FILE* fp = fopen(cover, "rb");
+	if (!fp)
+		return -1;
+	int n = fread(s_cover_data, 1, sizeof(s_cover_data), fp);
+	fclose(fp);
+
+	assert(n < sizeof(s_cover_data)); // assert load all
+	struct mov_udta_meta_t meta;
+	memset(&meta, 0, sizeof(meta));
+	meta.cover = s_cover_data;
+	meta.cover_size = n;
+	n = mov_udta_meta_write(&meta, s_udta, sizeof(s_udta));
+	assert(n < sizeof(s_udta)); // check buffer size
+	return mov_writer_add_udta(mov, s_udta, n);
 }
 
 void mov_writer_test(int w, int h, const char* inflv, const char* outmp4)
 {
 	int r, type;
+	size_t taglen;
 	uint32_t timestamp;
+
+	FILE* fp = fopen(outmp4, "wb+");
 	void* flv = flv_reader_create(inflv);
-	void* mov = mov_writer_create(outmp4);
-	void* demuxer = flv_demuxer_create(onFLV, mov);
+	mov_writer_t* mov = mov_writer_create(mov_file_buffer(), fp, MOV_FLAG_FASTSTART);
+	mov_writer_add_cover(mov, "cover.jpg");
 
 	s_width = w;
 	s_height = h;
-	while ((r = flv_reader_read(flv, &type, &timestamp, s_buffer, sizeof(s_buffer))) > 0)
+	while (1 == flv_reader_read(flv, &type, &timestamp, &taglen, s_buffer, sizeof(s_buffer)))
 	{
-		r = flv_demuxer_input(demuxer, type, s_buffer, r, timestamp);
-		if (r < 0)
-		{
-			assert(0);
-		}
+		r = flv_parser_tag(type, s_buffer, taglen, timestamp, onFLV, mov);
+		assert(r >= 0);
 	}
 
 	mov_writer_destroy(mov);
 	flv_reader_destroy(flv);
-	flv_demuxer_destroy(demuxer);
+	fclose(fp);
 }

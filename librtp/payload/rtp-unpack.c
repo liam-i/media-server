@@ -1,63 +1,37 @@
-#include "ctypedef.h"
-#include "rtp-unpack.h"
+// RFC3551 RTP Profile for Audio and Video Conferences with Minimal Control
+
 #include "rtp-packet.h"
+#include "rtp-profile.h"
+#include "rtp-payload-helper.h"
+#include "rtp-payload-internal.h"
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <errno.h>
 
-struct rtp_unpacker_t
+static int rtp_decode_rfc2250(void* p, const void* packet, int bytes)
 {
-	struct rtp_unpack_func_t func;
-	void* cbparam;
-
-	uint16_t seq; // RTP seq
-};
-
-static void* rtp_unpack_create(struct rtp_unpack_func_t *func, void* param)
-{
-	struct rtp_unpacker_t *unpacker;
-	unpacker = (struct rtp_unpacker_t *)malloc(sizeof(*unpacker));
-	if (!unpacker)
-		return NULL;
-
-	memset(unpacker, 0, sizeof(*unpacker));
-	memcpy(&unpacker->func, func, sizeof(unpacker->func));
-	unpacker->cbparam = param;
-	return unpacker;
-}
-
-static void rtp_unpack_destroy(void* p)
-{
-	struct rtp_unpacker_t *unpacker;
-	unpacker = (struct rtp_unpacker_t *)p;
-#if defined(_DEBUG) || defined(DEBUG)
-	memset(unpacker, 0xCC, sizeof(*unpacker));
-#endif
-	free(unpacker);
-}
-
-static int rtp_unpack_input(void* p, const void* packet, size_t bytes, uint64_t time)
-{
-	int discontinue;
+	int r;
 	struct rtp_packet_t pkt;
-	struct rtp_unpacker_t *unpacker;
+	struct rtp_payload_helper_t *helper;
 
-	unpacker = (struct rtp_unpacker_t *)p;
-	if (!unpacker || 0 != rtp_packet_deserialize(&pkt, packet, bytes))
-		return -1;
+	r = 0;
+	helper = (struct rtp_payload_helper_t *)p;
+	if (!helper || 0 != rtp_packet_deserialize(&pkt, packet, bytes))
+		return -EINVAL;
 
-	discontinue = (uint16_t)pkt.rtp.seq != (unpacker->seq + 1) ? 1 : 0;
-	unpacker->func.packet(unpacker->cbparam, pkt.payload, pkt.payloadlen, time, discontinue);
-	unpacker->seq = (uint16_t)pkt.rtp.seq;
-	return 0;
+	assert(pkt.payloadlen >= 0);
+	if(pkt.payloadlen > 0)
+		r = helper->handler.packet(helper->cbparam, pkt.payload, pkt.payloadlen, pkt.rtp.timestamp, 0);
+	return 0 == r ? 1 : r; // packet handled
 }
 
-struct rtp_unpack_t *rtp_unpacker()
+struct rtp_payload_decode_t *rtp_common_decode()
 {
-	static struct rtp_unpack_t unpacker = {
-		rtp_unpack_create,
-		rtp_unpack_destroy,
-		rtp_unpack_input,
+	static struct rtp_payload_decode_t unpacker = {
+		rtp_payload_helper_create,
+		rtp_payload_helper_destroy,
+		rtp_decode_rfc2250,
 	};
 
 	return &unpacker;

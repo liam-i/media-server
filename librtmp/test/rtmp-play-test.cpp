@@ -7,15 +7,6 @@
 
 static void* s_flv;
 
-static void* rtmp_client_alloc(void* /*param*/, int avtype, size_t bytes)
-{
-	static uint8_t s_audio[128 * 1024];
-	static uint8_t s_video[2 * 1024 * 1024];
-	assert(avtype || sizeof(s_audio) > bytes);
-	assert(sizeof(s_video) > bytes);
-	return avtype ? s_video : s_audio;
-}
-
 static int rtmp_client_send(void* param, const void* header, size_t len, const void* data, size_t bytes)
 {
 	socket_t* socket = (socket_t*)param;
@@ -35,35 +26,36 @@ static int rtmp_client_onvideo(void* /*param*/, const void* data, size_t bytes, 
 	return flv_writer_input(s_flv, FLV_TYPE_VIDEO, data, bytes, timestamp);
 }
 
-static int rtmp_client_onmeta(void* /*param*/, const void* /*data*/, size_t /*bytes*/)
+static int rtmp_client_onscript(void* /*param*/, const void* data, size_t bytes, uint32_t timestamp)
 {
-	return 0;
+	return flv_writer_input(s_flv, FLV_TYPE_SCRIPT, data, bytes, timestamp);
 }
 
-// rtmp_play_test("rtmp://strtmpplay.cdn.suicam.com/carousel/51632");
+// rtmp://live.alivecdn.com/live/hello?key=xxxxxx
+// rtmp_publish_aio_test("live.alivecdn.com", "live", "hello?key=xxxxxx", save-to-local-flv-file-name)
 void rtmp_play_test(const char* host, const char* app, const char* stream, const char* flv)
 {
 	static char packet[8 * 1024 * 1024];
-	snprintf(packet, sizeof(packet), "rtmp://%s/%s/%s", host, app, stream); // tcurl
+	snprintf(packet, sizeof(packet), "rtmp://%s/%s", host, app); // tcurl
 
 	socket_init();
 	socket_t socket = socket_connect_host(host, 1935, 2000);
 	socket_setnonblock(socket, 0);
 
 	struct rtmp_client_handler_t handler;
+	memset(&handler, 0, sizeof(handler));
 	handler.send = rtmp_client_send;
-	handler.alloc = rtmp_client_alloc;
-	handler.onmeta = rtmp_client_onmeta;
 	handler.onaudio = rtmp_client_onaudio;
 	handler.onvideo = rtmp_client_onvideo;
-	void* rtmp = rtmp_client_create(app, stream, packet/*tcurl*/, &socket, &handler);
+	handler.onscript = rtmp_client_onscript;
+	rtmp_client_t* rtmp = rtmp_client_create(app, stream, packet/*tcurl*/, &socket, &handler);
 	s_flv = flv_writer_create(flv);
 
 	int r = rtmp_client_start(rtmp, 1);
 
 	while ((r = socket_recv(socket, packet, sizeof(packet), 0)) > 0)
 	{
-		r = rtmp_client_input(rtmp, packet, r);
+		assert(0 == rtmp_client_input(rtmp, packet, r));
 	}
 
 	rtmp_client_stop(rtmp);

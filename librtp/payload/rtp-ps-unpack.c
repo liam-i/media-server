@@ -1,146 +1,69 @@
+/// RFC2250 2. Encapsulation of MPEG System and Transport Streams (p3)
+
+#include "rtp-packet.h"
+#include "rtp-payload-helper.h"
+#include "rtp-payload-internal.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
 #include <errno.h>
-#include "ctypedef.h"
-#include "rtp-unpack.h"
-#include "rtp-packet.h"
 
-struct rtp_ps_unpack_t
+// Pack start code
+static const uint8_t s_mpeg2_packet_start[] =  {0x00, 0x00, 0x01, 0xBA};
+
+static int rtp_decode_ps(void* p, const void* packet, int bytes)
 {
-	struct rtp_unpack_func_t func;
-	void* cbparam;
+    struct rtp_packet_t pkt;
+    struct rtp_payload_helper_t *helper;
 
-	int flag; // lost packet
-	uint16_t seq; // rtp seq
-	uint32_t timestamp;
+    helper = (struct rtp_payload_helper_t *)p;
+    if (!helper || 0 != rtp_packet_deserialize(&pkt, packet, bytes))
+        return -EINVAL;
 
-	uint8_t* ptr;
-	size_t size, capacity;
-};
+//    if(-1 == helper->flags)
+//    {
+//        if(pkt.payloadlen < sizeof(s_mpeg2_packet_start) + 2 || 0 != memcmp(s_mpeg2_packet_start, pkt.payload, sizeof(s_mpeg2_packet_start)))
+//           return 0; // packet discard, wait for first packet
+//    }
 
-static void* rtp_ps_unpack_create(struct rtp_unpack_func_t *func, void* param)
-{
-	struct rtp_ps_unpack_t *unpacker;
-	unpacker = (struct rtp_ps_unpack_t *)malloc(sizeof(*unpacker));
-	if(!unpacker)
-		return NULL;
+    // 2.1 RTP header usage(p4)
+    // M bit: Set to 1 whenever the timestamp is discontinuous. (such as
+    // might happen when a sender switches from one data
+    // source to another).This allows the receiver and any
+    // intervening RTP mixers or translators that are synchronizing
+    // to the flow to ignore the difference between this timestamp
+    // and any previous timestamp in their clock phase detectors.
+//    if (pkt.rtp.m)
+//    {
+//        //TODO: test
+//        // new frame start
+//        helper->size = 0; // discard previous packets
+//        helper->lost = 0;
+//        helper->flags |= RTP_PAYLOAD_FLAG_PACKET_LOST; // notify source changed
+//        helper->seq = (uint16_t)pkt.rtp.seq;
+//        helper->timestamp = pkt.rtp.timestamp;
+//    }
+//    else
+    {
+        rtp_payload_check(helper, &pkt);
+    }
+    
+    // ignore RTP M bit
+    if (pkt.payloadlen > sizeof(s_mpeg2_packet_start)  && 0 == memcmp(s_mpeg2_packet_start, pkt.payload, sizeof(s_mpeg2_packet_start)))
+        rtp_payload_onframe(helper); // new frame/access start
 
-	memset(unpacker, 0, sizeof(*unpacker));
-	memcpy(&unpacker->func, func, sizeof(unpacker->func));
-	unpacker->cbparam = param;
-	return unpacker;
+    rtp_payload_write(helper, &pkt);
+    return helper->lost ? 0 : 1; // packet handled
 }
 
-static void rtp_ps_unpack_destroy(void* p)
+struct rtp_payload_decode_t *rtp_ps_decode(void)
 {
-	struct rtp_ps_unpack_t *unpacker;
-	unpacker = (struct rtp_ps_unpack_t *)p;
+    static struct rtp_payload_decode_t decode = {
+        rtp_payload_helper_create,
+        rtp_payload_helper_destroy,
+        rtp_decode_ps,
+    };
 
-	if(unpacker->ptr)
-		free(unpacker->ptr);
-#if defined(_DEBUG) || defined(DEBUG)
-	memset(unpacker, 0xCC, sizeof(*unpacker));
-#endif
-	free(unpacker);
-}
-
-static int rtp_ps_unpack_input(void* p, const void* packet, size_t bytes, uint64_t time)
-{
-	struct rtp_packet_t pkt;
-	struct rtp_ps_unpack_t *unpacker;
-
-	unpacker = (struct rtp_ps_unpack_t *)p;
-	if(!unpacker || 0 != rtp_packet_deserialize(&pkt, packet, bytes) || pkt.payloadlen < 1)
-		return -1;
-
-	if((uint16_t)pkt.rtp.seq != unpacker->seq+1 && 0!=unpacker->seq)
-	{
-		// packet lost
-		unpacker->flag = 1;
-		unpacker->size = 0;
-		unpacker->seq = (uint16_t)pkt.rtp.seq;
-		printf("%s: rtp packet lost.\n", __FUNCTION__);
-		return EFAULT;
-	}
-
-	unpacker->seq = (uint16_t)pkt.rtp.seq;
-
-	assert(pkt.payloadlen > 0);
-	if(pkt.payloadlen > 0)
-	{
-		if(pkt.payloadlen > 0 && unpacker->size + pkt.payloadlen > unpacker->capacity)
-		{
-			void *ptr = realloc(unpacker->ptr, unpacker->capacity + pkt.payloadlen + 2048);
-			if(!ptr)
-			{
-				unpacker->flag = 1;
-				unpacker->size = 0;
-				return ENOMEM;
-			}
-
-			unpacker->ptr = (uint8_t*)ptr;
-			unpacker->capacity += pkt.payloadlen + 2048;
-		}
-	}
-
-	// RTP marker bit
-	if(pkt.rtp.m)
-	{
-		assert(pkt.payloadlen > 0);
-		assert(1==unpacker->flag || 0==unpacker->size || pkt.rtp.timestamp == unpacker->timestamp);
-		if(pkt.payload && pkt.payloadlen > 0)
-		{
-			memcpy(unpacker->ptr + unpacker->size, pkt.payload, pkt.payloadlen);
-			unpacker->size += pkt.payloadlen;
-		}
-
-		if(unpacker->size > 0 && 0 == unpacker->flag)
-		{
-			unpacker->func.packet(unpacker->cbparam, unpacker->ptr, unpacker->size, time, 0);
-		}
-
-		// frame boundary
-		unpacker->flag = 0;
-		unpacker->size = 0;
-	}
-	else if (pkt.rtp.timestamp != unpacker->timestamp)
-	{
-		if(unpacker->size > 0 && 0 == unpacker->flag)
-		{
-			unpacker->func.packet(unpacker->cbparam, unpacker->ptr, unpacker->size, time, 0);
-		}
-
-		// frame boundary
-		unpacker->flag = 0;
-		unpacker->size = 0;
-		if(pkt.payload && pkt.payloadlen > 0)
-		{
-			memcpy(unpacker->ptr + unpacker->size, pkt.payload, pkt.payloadlen);
-			unpacker->size = pkt.payloadlen;
-		}
-	}
-	else
-	{
-		if(pkt.payload && pkt.payloadlen > 0)
-		{
-			memcpy(unpacker->ptr + unpacker->size, pkt.payload, pkt.payloadlen);
-			unpacker->size += pkt.payloadlen;
-		}
-	}
-
-	unpacker->timestamp = pkt.rtp.timestamp;
-	return 0;
-}
-
-struct rtp_unpack_t *rtp_ps_unpacker()
-{
-	static struct rtp_unpack_t unpacker = {
-		rtp_ps_unpack_create,
-		rtp_ps_unpack_destroy,
-		rtp_ps_unpack_input,
-	};
-
-	return &unpacker;
+    return &decode;
 }

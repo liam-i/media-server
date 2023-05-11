@@ -1,31 +1,33 @@
-#include "file-reader.h"
-#include "file-writer.h"
 #include "mov-internal.h"
 #include <assert.h>
 #include <stdlib.h>
 #include <errno.h>
 
-int mov_read_avcC(struct mov_t* mov, const struct mov_box_t* box)
+// extra_data: ISO/IEC 14496-15 AVCDecoderConfigurationRecord
+
+int mov_read_avcc(struct mov_t* mov, const struct mov_box_t* box)
 {
 	struct mov_track_t* track = mov->track;
-	if (track->extra_data_size < box->size)
+	struct mov_sample_entry_t* entry = track->stsd.current;
+	if (entry->extra_data_size < box->size)
 	{
-		void* p = realloc(track->extra_data, box->size);
-		if (NULL == p) return ENOMEM;
-		track->extra_data = p;
+		void* p = realloc(entry->extra_data, (size_t)box->size);
+		if (NULL == p) return -ENOMEM;
+		entry->extra_data = p;
 	}
 
-	file_reader_read(mov->fp, track->extra_data, box->size);
-	track->extra_data_size = box->size;
-	return file_reader_error(mov->fp);
+	mov_buffer_read(&mov->io, entry->extra_data, box->size);
+	entry->extra_data_size = (int)box->size;
+	return mov_buffer_error(&mov->io);
 }
 
-size_t mov_write_avcC(const struct mov_t* mov)
+size_t mov_write_avcc(const struct mov_t* mov)
 {
 	const struct mov_track_t* track = mov->track;
-	file_writer_wb32(mov->fp, track->extra_data_size + 8); /* size */
-	file_writer_write(mov->fp, "avcC", 4);
-	if (track->extra_data_size > 0)
-		file_writer_write(mov->fp, track->extra_data, track->extra_data_size);
-	return track->extra_data_size + 8;
+	const struct mov_sample_entry_t* entry = track->stsd.current;
+	mov_buffer_w32(&mov->io, entry->extra_data_size + 8); /* size */
+	mov_buffer_write(&mov->io, "avcC", 4);
+	if (entry->extra_data_size > 0)
+		mov_buffer_write(&mov->io, entry->extra_data, entry->extra_data_size);
+	return entry->extra_data_size + 8;
 }

@@ -5,8 +5,6 @@
 #include "rtmp-netconnection.h"
 #include "rtmp-netstream.h"
 
-#define strlcpy(t, s, n) snprintf(t, n, "%s", s);
-
 #define N_CHUNK_STREAM	8 // maximum chunk stream count
 #define N_STREAM_NAME	256
 
@@ -17,6 +15,7 @@
 #define RTMP_LEVEL_WARNING	"warning"
 #define RTMP_LEVEL_STATUS	"status"
 #define RTMP_LEVEL_ERROR	"error"
+#define RTMP_LEVEL_FINISH	"finish" // ksyun cdn
 
 // Chunk Stram Id
 enum rtmp_channel_t
@@ -59,6 +58,7 @@ enum rtmp_notify_t
 struct rtmp_packet_t
 {
 	struct rtmp_chunk_header_t header;
+	uint32_t delta; // delta / timestamp
 	uint32_t clock; // timestamp
 
 	uint8_t* payload;
@@ -110,42 +110,40 @@ struct rtmp_t
 
 	void* param;
 
-	void* (*alloc)(void* param, int avtype, size_t bytes);
-
 	/// @return 0-ok, other-error
 	int (*send)(void* param, const uint8_t* header, uint32_t headerBytes, const uint8_t* payload, uint32_t payloadBytes);
 	
 	int (*onaudio)(void* param, const uint8_t* data, size_t bytes, uint32_t timestamp);
 	int (*onvideo)(void* param, const uint8_t* data, size_t bytes, uint32_t timestamp);
+	int (*onscript)(void* param, const uint8_t* data, size_t bytes, uint32_t timestamp);
 
 	void (*onabort)(void* param, uint32_t chunk_stream_id);
 
-	union
+	struct
 	{
-		struct
-		{
-			// server side
-			int (*onconnect)(void* param, int r, double transaction, const struct rtmp_connect_t* connect);
-			int (*oncreate_stream)(void* param, int r, double transaction);
-			int (*onplay)(void* param, int r, double transaction, const char* stream_name, double start, double duration, uint8_t reset);
-			int (*ondelete_stream)(void* param, int r, double transaction, double stream_id);
-			int (*onreceive_audio)(void* param, int r, double transaction, uint8_t audio);
-			int (*onreceive_video)(void* param, int r, double transaction, uint8_t video);
-			int (*onpublish)(void* param, int r, double transaction, const char* stream_name, const char* stream_type);
-			int (*onseek)(void* param, int r, double transaction, double milliSeconds);
-			int (*onpause)(void* param, int r, double transaction, uint8_t pause, double milliSeconds);
-		} server;
+		// server side
+		int (*onconnect)(void* param, int r, double transaction, const struct rtmp_connect_t* connect);
+		int (*oncreate_stream)(void* param, int r, double transaction);
+		int (*onplay)(void* param, int r, double transaction, const char* stream_name, double start, double duration, uint8_t reset);
+		int (*ondelete_stream)(void* param, int r, double transaction, double stream_id);
+		int (*onreceive_audio)(void* param, int r, double transaction, uint8_t audio);
+		int (*onreceive_video)(void* param, int r, double transaction, uint8_t video);
+		int (*onpublish)(void* param, int r, double transaction, const char* stream_name, const char* stream_type);
+		int (*onseek)(void* param, int r, double transaction, double milliSeconds);
+		int (*onpause)(void* param, int r, double transaction, uint8_t pause, double milliSeconds);
+		int (*onget_stream_length)(void* param, int r, double transaction, const char* stream_name);
+	} server;
 
-		struct
-		{
-			// client side
-			int (*onconnect)(void* param);
-			int (*oncreate_stream)(void* param, double stream_id);
-			int (*onnotify)(void* param, enum rtmp_notify_t notify);
-			int (*onping)(void* param, uint32_t timestamp); // send pong
-			int (*onbandwidth)(void* param); // send window acknowledgement size
-		} client;
-	} u;
+	struct
+	{
+		// client side
+		int (*onconnect)(void* param);
+		int (*oncreate_stream)(void* param, double stream_id);
+		int (*onnotify)(void* param, enum rtmp_notify_t notify);
+        int (*oneof)(void* param, uint32_t stream_id); // EOF event
+		int (*onping)(void* param, uint32_t stream_id); // send pong
+		int (*onbandwidth)(void* param); // send window acknowledgement size
+	} client;
 };
 
 /// @return 0-ok, other-error

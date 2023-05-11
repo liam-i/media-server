@@ -7,6 +7,9 @@
 #include <string.h>
 #include <assert.h>
 
+#define RTMP_CHUNK_SIZE_MINIMUM 64
+#define RTMP_CHUNK_SIZE_MAXIMUM 0x800000
+
 /// 5.4.1. Set Chunk Size (1)
 /// @return 0-error, >0-ok
 static int rtmp_read_chunk_size(const uint8_t* out, size_t size, uint32_t *chunkSize)
@@ -14,7 +17,8 @@ static int rtmp_read_chunk_size(const uint8_t* out, size_t size, uint32_t *chunk
 	if (size >= 4)
 	{
 		be_read_uint32(out, chunkSize);
-		*chunkSize &= 0x7FFFFFFF;
+        if (*chunkSize < RTMP_CHUNK_SIZE_MINIMUM || *chunkSize > RTMP_CHUNK_SIZE_MAXIMUM)
+            return 0;
 		return 4;
 	}
 	return 0;
@@ -101,7 +105,7 @@ int rtmp_control_handler(struct rtmp_t* rtmp, const struct rtmp_chunk_header_t* 
 		assert(5 == header->length);
 		if (5 == rtmp_read_set_peer_bandwidth(data, header->length, &rtmp->peer_bandwidth, &rtmp->limit_type))
 		{
-			rtmp->u.client.onbandwidth(rtmp->param);
+			rtmp->client.onbandwidth ? rtmp->client.onbandwidth(rtmp->param) : 0;
 			return 5;
 		}
 		return 0;

@@ -1,5 +1,3 @@
-ROOT:=../../sdk
-
 #--------------------------------Output------------------------------
 # OUTTYPE: 0-exe, 1-dll, 2-static
 #--------------------------------------------------------------------
@@ -39,11 +37,6 @@ STATIC_LIBS =
 #
 # DEFINES := $(addprefix -D,$(DEFINES)) # add -L prefix
 #--------------------------------------------------------------------
-DEFINES =
+DEFINES = MPEG_H26X_VERIFY MPEG_ZERO_PAYLOAD_LENGTH MPEG_DAHUA_AAC_FROM_G711
 
-include $(ROOT)/gcc.mk
-
-GCC_VER_GTE44 := $(shell echo `gcc -dumpversion | cut -f1-2 -d.` \< 4.4 | bc )
-ifeq ($(GCC_VER_GTE44),1)
-CFLAGS += -march=i586
-endif
+include ../gcc.mk
